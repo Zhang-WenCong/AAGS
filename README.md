@@ -10,16 +10,16 @@
 
 Follow the instructions in [gaussian-splatting](https://github.com/graphdeco-inria/gaussian-splatting) to setup the environment and submodules, after that, you need to install [tiny-cuda-nn](https://github.com/NVlabs/tiny-cuda-nn).
 
-   The code is tested on:
+The code is tested on:
    
-    ```
-    OS: Ubuntu 22.04
-    GPU: RTX 3090
-    CUDA: 11.8
-    Python: 3.9
-    Pytorch: 2.0.1+cu118
-    tinycudann: 1.7
-    ```
+```
+OS: Ubuntu 22.04
+GPU: RTX 3090
+CUDA: 11.8
+Python: 3.9
+Pytorch: 2.0.1+cu118
+tinycudann: 1.7
+```
 
 ## Data download
 
