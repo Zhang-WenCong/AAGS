@@ -36,7 +36,7 @@ import numpy as np
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset, opt)
-    gaussians = GaussianModel(sh_degree=dataset.sh_degree, mlp_depth=opt.mlp_depth, mlp_width=opt.mlp_width, frgb=opt.frgb, mask=opt.mask_unet, a_use=opt.a_enc)
+    gaussians = GaussianModel(sh_degree=dataset.sh_degree, mlp_depth=opt.mlp_depth, mlp_width=opt.mlp_width, frgb=opt.frgb, type=dataset.source_path, mask=opt.mask_unet, a_use=opt.a_enc)
 
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)

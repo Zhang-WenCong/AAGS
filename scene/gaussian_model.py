@@ -45,7 +45,7 @@ class GaussianModel(nn.Module):
         self.rotation_activation = torch.nn.functional.normalize
 
 
-    def __init__(self, sh_degree : int, mlp_depth = 2, mlp_width = 64, frgb = 24, mask = False, a_use = False):
+    def __init__(self, sh_degree : int, mlp_depth = 2, mlp_width = 64, frgb = 24, type='gate', mask = False, a_use = False):
         super().__init__()
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree  
@@ -74,9 +74,12 @@ class GaussianModel(nn.Module):
         self.a_use = a_use
         if self.a_use:
             self.a_encoder = E_attr(3, 48).cuda()
-            # self.a_encoder.load_state_dict(torch.load( \
-            #     '/data/code/gs_hanerf/weights/trevi_good.pth'))
-                # gate_good trevi_good sacre_good
+            if(type.find('gate') != -1):
+                self.a_encoder.load_state_dict(torch.load('./weights/gate_good.pth'))
+            elif(type.find('trevi') != -1):
+                self.a_encoder.load_state_dict(torch.load('./weights/trevi_good.pth'))
+            else:
+                self.a_encoder.load_state_dict(torch.load('./weights/sacre_good.pth'))
         if self.mask:
             self.mask_generator = UNet(n_channels=3, n_classes=1).cuda()
 

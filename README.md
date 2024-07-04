@@ -42,3 +42,8 @@ python train.py \
 ```
 
 Add `--a_enc` for using appearance module, `--mask_unet` for using anti-occlusion module.
+
+Or just run
+```
+sh benchmark_wild.sh
+```
