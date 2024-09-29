@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # please change dir to your dataset path
-export ROOT_DIR1=/data/dataset/nerf_wild/brandenburg_gate/dense
-export ROOT_DIR2=/data/dataset/nerf_wild/sacre_coeur/dense
-export ROOT_DIR3=/data/dataset/nerf_wild/trevi_fountain/dense
+export ROOT_DIR1=/aiarena/gpfs/data/dataset/nerf_wild/brandenburg_gate/dense
+export ROOT_DIR2=/aiarena/gpfs/data/dataset/nerf_wild/sacre_coeur/dense
+export ROOT_DIR3=/aiarena/gpfs/data/dataset/nerf_wild/trevi_fountain/dense
 
 CUDA_VISIBLE_DEVICES=0 \
 python train.py \
