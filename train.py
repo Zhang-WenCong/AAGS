@@ -18,6 +18,9 @@ from gaussian_renderer import render, network_gui
 import sys
 from scene import Scene, GaussianModel
 from utils.general_utils import safe_state
+from render import render_set
+from metrics import evaluate as evaluate_metrics
+import torchvision
 
 import random
 from tqdm import tqdm
@@ -46,6 +49,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+
+    render_temp_path=os.path.join(dataset.model_path,"train_temp_rendering")
+    gt_temp_path=os.path.join(dataset.model_path,"train_temp_gt")
+    os.makedirs(render_temp_path,exist_ok=True)
+    os.makedirs(gt_temp_path,exist_ok=True)
+    if opt.mask_unet:
+        render_temp_mask_path=os.path.join(dataset.model_path,"train_mask_temp_rendering")
+        os.makedirs(render_temp_mask_path,exist_ok=True) 
 
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
@@ -136,11 +147,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         with torch.no_grad():
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
-            if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
+            total_point = gaussians._xyz.shape[0]
+            if iteration%1000==0 or iteration==1:
+                torchvision.utils.save_image(image, os.path.join(render_temp_path, f"iter{iteration}_"+viewpoint_cam.image_name + ".png"))
+                torchvision.utils.save_image(gt_image, os.path.join(gt_temp_path, f"iter{iteration}_"+viewpoint_cam.image_name + ".png"))
+                if opt.mask_unet:
+                    torchvision.utils.save_image(input['out_mask'], os.path.join(render_temp_mask_path, f"iter{iteration}_"+viewpoint_cam.image_name + ".png"))
+            if iteration % 10 == 0:            
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}",
+                                           "point":f"{total_point}"})
                 progress_bar.update(10)
             if iteration == opt.iterations:
-                progress_bar.close()
+                progress_bar.close()    
 
             # if iteration == opt.iterations:
             #     gaussians.mask_prune()
@@ -183,6 +201,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+    
+    with torch.no_grad():
+        torch.cuda.empty_cache()
+        print(f"Rendering testing set [{len(scene.getTestCameras())}]...")
+        render_set(dataset.model_path, "test", opt.iterations + 1, scene.getTestCameras(), gaussians, pipe, background, a_use=opt.a_enc, enc_a_r=None)
+        print("Evaluating metrics on testing set...")
+        evaluate_metrics([dataset.model_path])
 
 def prepare_output_and_logger(args, opt):    
     if not args.model_path:

@@ -92,16 +92,23 @@ class GaussianModel(nn.Module):
                 },
             ).cuda()
             enc_dim = 48 if self.a_use else 0
-            self.mlp_head = tcnn.Network(
-                n_input_dims = self.frgb_num + enc_dim + self.direction_encoding.n_output_dims,
-                n_output_dims=3,
-                network_config={
-                    "otype": "FullyFusedMLP",
-                    "activation": "ReLU",
-                    "output_activation": "Sigmoid",
-                    "n_neurons": mlp_width,
-                    "n_hidden_layers": mlp_depth,
-                },
+            # self.mlp_head = tcnn.Network(
+            #     n_input_dims = self.frgb_num + enc_dim + self.direction_encoding.n_output_dims,
+            #     n_output_dims=3,
+            #     network_config={
+            #         "otype": "FullyFusedMLP",
+            #         "activation": "ReLU",
+            #         "output_activation": "Sigmoid",
+            #         "n_neurons": mlp_width,
+            #         "n_hidden_layers": mlp_depth,
+            #     },
+            # ).cuda()
+            self.mlp_head = nn.Sequential(
+                nn.Linear(self.frgb_num + enc_dim + self.direction_encoding.n_output_dims, mlp_width),
+                nn.ReLU(),
+                nn.Linear(mlp_width, mlp_width),
+                nn.ReLU(),
+                nn.Linear(mlp_width, 3)
             ).cuda()
 
     @property
@@ -131,7 +138,7 @@ class GaussianModel(nn.Module):
         else:
             h = torch.cat([embeding, d], dim=-1) # (n,frgb_num+16)
         
-        return self.mlp_head(h).float()
+        return self.mlp_head(h)
 
     def get_mask(self, x):
         '''
