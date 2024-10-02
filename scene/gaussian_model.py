@@ -20,10 +20,26 @@ from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
+import math
+from functools import reduce
+from operator import mul
 
 from scene.ha_networks import E_attr, UNet
 
 import tinycudann as tcnn
+
+
+def _get_fourier_features(xyz, num_features=4):
+    xyz = torch.from_numpy(xyz).to(dtype=torch.float32)
+    xyz = xyz - xyz.mean(dim=0, keepdim=True)
+    xyz = xyz / torch.quantile(xyz.abs(), 0.97, dim=0) * 0.5 + 0.5
+    freqs = torch.repeat_interleave(
+        2**torch.linspace(0, num_features-1, num_features, dtype=xyz.dtype, device=xyz.device), 2)
+    offsets = torch.tensor([0, 0.5 * math.pi] * num_features, dtype=xyz.dtype, device=xyz.device)
+    feat = xyz[..., None] * freqs[None, None] * 2 * math.pi + offsets[None, None]
+    feat = torch.sin(feat).reshape(-1, reduce(mul, feat.shape[1:]))
+    print(feat.shape)
+    return feat
 
 class GaussianModel(nn.Module):
 
@@ -45,7 +61,7 @@ class GaussianModel(nn.Module):
         self.rotation_activation = torch.nn.functional.normalize
 
 
-    def __init__(self, sh_degree : int, mlp_depth = 2, mlp_width = 64, frgb = 24, type='gate', mask = False, a_use = False):
+    def __init__(self, sh_degree : int, mlp_depth = 2, mlp_width = 128, frgb = 24, mask = False, a_use = False):
         super().__init__()
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree  
@@ -59,6 +75,7 @@ class GaussianModel(nn.Module):
         self._scaling = torch.empty(0)
         self._rotation = torch.empty(0)
         self._opacity = torch.empty(0)
+        self._xyzEmbeding = torch.empty(0)
         # self._mask = torch.empty(0)
         self.max_radii2D = torch.empty(0)
         self.xyz_gradient_accum = torch.empty(0)
@@ -74,12 +91,9 @@ class GaussianModel(nn.Module):
         self.a_use = a_use
         if self.a_use:
             self.a_encoder = E_attr(3, 48).cuda()
-            if(type.find('gate') != -1):
-                self.a_encoder.load_state_dict(torch.load('./weights/gate_good.pth'))
-            elif(type.find('trevi') != -1):
-                self.a_encoder.load_state_dict(torch.load('./weights/trevi_good.pth'))
-            else:
-                self.a_encoder.load_state_dict(torch.load('./weights/sacre_good.pth'))
+            self.a_encoder.load_state_dict(torch.load( \
+                './weights/gate_good.pth'))
+                # gate_good trevi_good sacre_good
         if self.mask:
             self.mask_generator = UNet(n_channels=3, n_classes=1).cuda()
 
@@ -92,23 +106,16 @@ class GaussianModel(nn.Module):
                 },
             ).cuda()
             enc_dim = 48 if self.a_use else 0
-            # self.mlp_head = tcnn.Network(
-            #     n_input_dims = self.frgb_num + enc_dim + self.direction_encoding.n_output_dims,
-            #     n_output_dims=3,
-            #     network_config={
-            #         "otype": "FullyFusedMLP",
-            #         "activation": "ReLU",
-            #         "output_activation": "Sigmoid",
-            #         "n_neurons": mlp_width,
-            #         "n_hidden_layers": mlp_depth,
-            #     },
-            # ).cuda()
-            self.mlp_head = nn.Sequential(
-                nn.Linear(self.frgb_num + enc_dim + self.direction_encoding.n_output_dims, mlp_width),
-                nn.ReLU(),
-                nn.Linear(mlp_width, mlp_width),
-                nn.ReLU(),
-                nn.Linear(mlp_width, 3)
+            self.mlp_head = tcnn.Network(
+                n_input_dims = self.frgb_num + enc_dim + self.direction_encoding.n_output_dims + 24,
+                n_output_dims=3,
+                network_config={
+                    "otype": "FullyFusedMLP",
+                    "activation": "ReLU",
+                    "output_activation": "Sigmoid",
+                    "n_neurons": mlp_width,
+                    "n_hidden_layers": mlp_depth,
+                },
             ).cuda()
 
     @property
@@ -134,11 +141,11 @@ class GaussianModel(nn.Module):
         embeding = self.feature_rgb # (n, frgb_num)
         if enc_a is not None:
             enc_a = enc_a.repeat(n, 1)
-            h = torch.cat([embeding, d, enc_a], dim=-1) # (n,frgb_num+16+48)
+            h = torch.cat([embeding, d, enc_a, self._xyzEmbeding], dim=-1) # (n,frgb_num+16+48+24)
         else:
             h = torch.cat([embeding, d], dim=-1) # (n,frgb_num+16)
         
-        return self.mlp_head(h)
+        return self.mlp_head(h).float()
 
     def get_mask(self, x):
         '''
@@ -203,6 +210,9 @@ class GaussianModel(nn.Module):
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
+        embeddings = _get_fourier_features(pcd.points, num_features=4)
+        embeddings.add_(torch.randn_like(embeddings) * 0.0001)
+        self._xyzEmbeding = nn.Parameter(embeddings.requires_grad_(True).cuda())
         # self._mask = nn.Parameter(torch.ones((fused_point_cloud.shape[0], 1), device="cuda").requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
@@ -227,6 +237,7 @@ class GaussianModel(nn.Module):
                 {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
                 {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
                 {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"},
+                {'params': [self._xyzEmbeding], 'lr': 0.005, "name": "xyzEmbeding"},
                 # {'params': [self._mask], 'lr': 0.01, "name": "mask"}
             ]
             _l = [
@@ -237,7 +248,7 @@ class GaussianModel(nn.Module):
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
         if self.a_use:
             self.optimizer_2 = torch.optim.Adam(_l, lr=5e-4, eps=1e-15)
-            self.scheduler_2 = torch.optim.lr_scheduler.StepLR(self.optimizer_2, step_size=3000, gamma=1)
+            self.scheduler_2 = torch.optim.lr_scheduler.StepLR(self.optimizer_2, step_size=9000, gamma=0.8)
 
         self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
                                                     lr_final=training_args.position_lr_final*self.spatial_lr_scale,
@@ -247,7 +258,7 @@ class GaussianModel(nn.Module):
         if self.mask:
             _l_mask = [{'params': self.mask_generator.parameters(), "name": "_mask_generator"}]
             self.optimizer_3 = torch.optim.Adam(_l_mask, lr=0.001, eps=1e-15)
-            self.scheduler_3 = torch.optim.lr_scheduler.PolynomialLR(self.optimizer_3, total_iters=15_000, power=1)
+            self.scheduler_3 = torch.optim.lr_scheduler.PolynomialLR(self.optimizer_3, total_iters=70_000, power=1)
 
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
@@ -273,6 +284,8 @@ class GaussianModel(nn.Module):
         else:
             for i in range(self._features_rgb.shape[1]):
                 l.append('f_rgb_{}'.format(i))
+            for i in range(self._xyzEmbeding.shape[1]):
+                l.append('xyzEmbeding_{}'.format(i))
         l.append('opacity')
         for i in range(self._scaling.shape[1]):
             l.append('scale_{}'.format(i))
@@ -289,6 +302,7 @@ class GaussianModel(nn.Module):
             f_rest = self._features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
         else:
             f_rgb = self._features_rgb.detach().contiguous().cpu().numpy()
+            xyzEmbeding = self._xyzEmbeding.detach().contiguous().cpu().numpy()
         opacities = self._opacity.detach().cpu().numpy()
         scale = self._scaling.detach().cpu().numpy()
         rotation = self._rotation.detach().cpu().numpy()
@@ -297,7 +311,7 @@ class GaussianModel(nn.Module):
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
         if self.a_use:
-            attributes = np.concatenate((xyz, f_rgb, opacities, scale, rotation), axis=1)
+            attributes = np.concatenate((xyz, f_rgb, xyzEmbeding, opacities, scale, rotation), axis=1)
         else:
             attributes = np.concatenate((xyz, f_dc, f_rest, opacities, scale, rotation), axis=1)
         elements[:] = list(map(tuple, attributes))
@@ -333,6 +347,9 @@ class GaussianModel(nn.Module):
             f_rgb = np.zeros((xyz.shape[0], self.frgb_num))
             for i in range(self.frgb_num):
                 f_rgb[:, i] = np.asarray(plydata.elements[0]['f_rgb_{}'.format(i)])
+            xyzEmbeding = np.zeros((xyz.shape[0], 6*4))
+            for i in range(6*4):
+                xyzEmbeding[:, i] = np.asarray(plydata.elements[0]['xyzEmbeding_{}'.format(i)])
 
         if not self.a_use:
             extra_f_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("f_rest_")]
@@ -370,6 +387,7 @@ class GaussianModel(nn.Module):
             self._features_rest = nn.Parameter(torch.tensor(features_extra, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
         else:
             self._features_rgb = nn.Parameter(torch.tensor(f_rgb, dtype=torch.float, device="cuda").contiguous().requires_grad_(True))
+            self._xyzEmbeding = nn.Parameter(torch.tensor(xyzEmbeding, dtype=torch.float, device="cuda").contiguous().requires_grad_(True))
         self._opacity = nn.Parameter(torch.tensor(opacities, dtype=torch.float, device="cuda").requires_grad_(True))
         self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
@@ -423,6 +441,7 @@ class GaussianModel(nn.Module):
             self._features_rest = optimizable_tensors["f_rest"]
         else:
             self._features_rgb = optimizable_tensors["f_rgb"]
+            self._xyzEmbeding = optimizable_tensors["xyzEmbeding"]
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
@@ -456,13 +475,14 @@ class GaussianModel(nn.Module):
 
         return optimizable_tensors
 
-    def densification_postfix(self, new_xyz, new_features_rgb, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_mask=None):
+    def densification_postfix(self, new_xyz, new_features_rgb, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_mask=None, new_xyzEmbeding=None):
         if self.a_use:
             d = {"xyz": new_xyz,
             "f_rgb": new_features_rgb,
+            "xyzEmbeding": new_xyzEmbeding,
             "opacity": new_opacities,
             "scaling" : new_scaling,
-            "rotation" : new_rotation,
+            "rotation" : new_rotation
             # "mask": new_mask
             }
         else:
@@ -480,6 +500,7 @@ class GaussianModel(nn.Module):
             self._features_rest = optimizable_tensors["f_rest"]
         else:
             self._features_rgb = optimizable_tensors["f_rgb"]
+            self._xyzEmbeding = optimizable_tensors["xyzEmbeding"]
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
@@ -510,11 +531,12 @@ class GaussianModel(nn.Module):
             new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
         else:
             new_feature_rgb = self._features_rgb[selected_pts_mask].repeat(N,1)
+            new_xyzEmbeding = self._xyzEmbeding[selected_pts_mask].repeat(N,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
         # new_mask = self._mask[selected_pts_mask].repeat(N,1)
 
         if self.a_use:
-            self.densification_postfix(new_xyz, new_feature_rgb, None, None, new_opacity, new_scaling, new_rotation)
+            self.densification_postfix(new_xyz, new_feature_rgb, None, None, new_opacity, new_scaling, new_rotation, None, new_xyzEmbeding)
         else:
             self.densification_postfix(new_xyz, None, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation)
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
@@ -532,13 +554,14 @@ class GaussianModel(nn.Module):
             new_features_rest = self._features_rest[selected_pts_mask]
         else:
             new_features_rgb = self._features_rgb[selected_pts_mask]
+            new_xyzEmbeding = self._xyzEmbeding[selected_pts_mask]
         new_opacities = self._opacity[selected_pts_mask]
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
         # new_mask = self._mask[selected_pts_mask]
 
         if self.a_use:
-            self.densification_postfix(new_xyz, new_features_rgb, None, None, new_opacities, new_scaling, new_rotation)
+            self.densification_postfix(new_xyz, new_features_rgb, None, None, new_opacities, new_scaling, new_rotation, None, new_xyzEmbeding)
         else:
             self.densification_postfix(new_xyz, None, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation)
 

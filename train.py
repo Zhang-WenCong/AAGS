@@ -21,6 +21,8 @@ from utils.general_utils import safe_state
 from render import render_set
 from metrics import evaluate as evaluate_metrics
 import torchvision
+from PIL import Image
+import torchvision.transforms as transforms
 
 import random
 from tqdm import tqdm
@@ -39,8 +41,8 @@ import numpy as np
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset, opt)
-    gaussians = GaussianModel(sh_degree=dataset.sh_degree, mlp_depth=opt.mlp_depth, mlp_width=opt.mlp_width, frgb=opt.frgb, type=dataset.source_path, mask=opt.mask_unet, a_use=opt.a_enc)
-
+    gaussians = GaussianModel(sh_degree=dataset.sh_degree, mlp_depth=opt.mlp_depth, mlp_width=opt.mlp_width, frgb=opt.frgb, mask=opt.mask_unet, a_use=opt.a_enc)
+    
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
     if checkpoint:
@@ -211,7 +213,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
 def prepare_output_and_logger(args, opt):    
     if not args.model_path:
-        args.model_path = os.path.join("./output1/", args.exp_name)
+        args.model_path = os.path.join("./outputLog/", args.exp_name)
         
     # Set up output folder
     print("Output folder: {}".format(args.model_path))
@@ -244,8 +246,6 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
             if config['cameras'] and len(config['cameras']) > 0:
                 l1_test = 0.0
                 psnr_test = 0.0
-                ssim_test = 0.0
-                lpipss_test = 0.0
                 for idx, viewpoint in enumerate(config['cameras']):
                     if a_use:
                         enc_a = scene.gaussians.a_encoder(viewpoint.original_image_8.cuda().unsqueeze(0))
@@ -253,25 +253,18 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                         enc_a = None
                     image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs, a_use = a_use, enc_a_r = enc_a)["render"], 0.0, 1.0)
                     gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
-                    res = torch.cat((image[None], gt_image[None]), dim=0)
                     if tb_writer and (idx < 30):
-                        tb_writer.add_images("{}_view/render_{}".format(config['name'], viewpoint.image_name), res, global_step=iteration)
-                        # if iteration == testing_iterations[0]:
-                        #     tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
+                        tb_writer.add_images("{}_view/render_{}".format(config['name'], viewpoint.image_name), image[None], global_step=iteration)
+                        if iteration == testing_iterations[0]:
+                            tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
                     l1_test += l1_loss(image, gt_image).mean().double()
                     psnr_test += psnr(image, gt_image).mean().double()
-                    ssim_test += ssim(image, gt_image).mean().double()
-                    lpipss_test += lpips(image.unsqueeze(0), gt_image.unsqueeze(0), net_type='vgg').mean().double()
                 psnr_test /= len(config['cameras'])
                 l1_test /= len(config['cameras'])        
-                ssim_test /= len(config['cameras']) 
-                lpipss_test /= len(config['cameras'])   
-                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {} ssim {} lpipss {}".format(iteration, config['name'], l1_test, psnr_test, ssim_test, lpipss_test))
+                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
                 if tb_writer:
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
-                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - ssim', ssim_test, iteration)
-                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - lpipss', lpipss_test, iteration)
 
         if tb_writer:
             tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
@@ -287,8 +280,8 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 15_000, 21_000, 24_000, 27_000, 30_000, 33_000, 36_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[30_000])
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[10] + [i * 5000 for i in range(1, 15, 1)])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[70_000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
