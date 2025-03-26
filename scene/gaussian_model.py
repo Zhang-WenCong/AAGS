@@ -28,7 +28,6 @@ from scene.ha_networks import E_attr, UNet
 
 import tinycudann as tcnn
 
-
 def _get_fourier_features(xyz, num_features=4):
     xyz = torch.from_numpy(xyz).to(dtype=torch.float32)
     xyz = xyz - xyz.mean(dim=0, keepdim=True)
@@ -61,7 +60,7 @@ class GaussianModel(nn.Module):
         self.rotation_activation = torch.nn.functional.normalize
 
 
-    def __init__(self, sh_degree : int, mlp_depth = 2, mlp_width = 128, frgb = 24, mask = False, a_use = False):
+    def __init__(self, sh_degree : int, mlp_depth = 2, mlp_width = 128, frgb = 24, mask = False, a_use = False, mask_prune_use = False):
         super().__init__()
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree  
@@ -76,7 +75,8 @@ class GaussianModel(nn.Module):
         self._rotation = torch.empty(0)
         self._opacity = torch.empty(0)
         self._xyzEmbeding = torch.empty(0)
-        # self._mask = torch.empty(0)
+        if mask_prune_use:
+            self._mask = torch.empty(0)
         self.max_radii2D = torch.empty(0)
         self.xyz_gradient_accum = torch.empty(0)
         self.denom = torch.empty(0)
@@ -89,11 +89,9 @@ class GaussianModel(nn.Module):
         self.frgb_num = frgb
         self.mask = mask
         self.a_use = a_use
+        self.mask_prune_use = mask_prune_use
         if self.a_use:
             self.a_encoder = E_attr(3, 48).cuda()
-            self.a_encoder.load_state_dict(torch.load( \
-                './weights/gate_good.pth'))
-                # gate_good trevi_good sacre_good
         if self.mask:
             self.mask_generator = UNet(n_channels=3, n_classes=1).cuda()
 
@@ -213,7 +211,8 @@ class GaussianModel(nn.Module):
         embeddings = _get_fourier_features(pcd.points, num_features=4)
         embeddings.add_(torch.randn_like(embeddings) * 0.0001)
         self._xyzEmbeding = nn.Parameter(embeddings.requires_grad_(True).cuda())
-        # self._mask = nn.Parameter(torch.ones((fused_point_cloud.shape[0], 1), device="cuda").requires_grad_(True))
+        if self.mask_prune_use:
+            self._mask = nn.Parameter(torch.ones((fused_point_cloud.shape[0], 1), device="cuda").requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
     def training_setup(self, training_args):
@@ -244,6 +243,8 @@ class GaussianModel(nn.Module):
                 {'params': self.mlp_head.parameters(), "name": "_mlp_head"},
                 {'params': self.a_encoder.parameters(), 'lr': 1e-4, "name": "_a_encoder"},
             ]
+        if self.mask_prune_use:
+            l.append({'params': [self._mask], 'lr': 0.01, "name": "mask"})
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
         if self.a_use:
@@ -445,7 +446,8 @@ class GaussianModel(nn.Module):
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
-        # self._mask = optimizable_tensors["mask"]
+        if self.mask_prune_use:
+            self._mask = optimizable_tensors["mask"]
 
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
         self.denom = self.denom[valid_points_mask]
@@ -492,6 +494,8 @@ class GaussianModel(nn.Module):
             "opacity": new_opacities,
             "scaling" : new_scaling,
             "rotation" : new_rotation}
+        if self.mask_prune_use:
+                d["mask"] = new_mask
 
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
         self._xyz = optimizable_tensors["xyz"]
@@ -504,7 +508,8 @@ class GaussianModel(nn.Module):
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
-        # self._mask = optimizable_tensors["mask"]
+        if self.mask_prune_use:
+            self._mask = optimizable_tensors["mask"]
 
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -533,12 +538,15 @@ class GaussianModel(nn.Module):
             new_feature_rgb = self._features_rgb[selected_pts_mask].repeat(N,1)
             new_xyzEmbeding = self._xyzEmbeding[selected_pts_mask].repeat(N,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
-        # new_mask = self._mask[selected_pts_mask].repeat(N,1)
+        if self.mask_prune_use:
+            new_mask = self._mask[selected_pts_mask].repeat(N,1)
+        else:
+            new_mask = None
 
         if self.a_use:
-            self.densification_postfix(new_xyz, new_feature_rgb, None, None, new_opacity, new_scaling, new_rotation, None, new_xyzEmbeding)
+            self.densification_postfix(new_xyz, new_feature_rgb, None, None, new_opacity, new_scaling, new_rotation, new_mask, new_xyzEmbeding)
         else:
-            self.densification_postfix(new_xyz, None, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation)
+            self.densification_postfix(new_xyz, None, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_mask)
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
 
@@ -558,12 +566,15 @@ class GaussianModel(nn.Module):
         new_opacities = self._opacity[selected_pts_mask]
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
-        # new_mask = self._mask[selected_pts_mask]
+        if self.mask_prune_use:
+            new_mask = self._mask[selected_pts_mask]
+        else:
+            new_mask = None
 
         if self.a_use:
-            self.densification_postfix(new_xyz, new_features_rgb, None, None, new_opacities, new_scaling, new_rotation, None, new_xyzEmbeding)
+            self.densification_postfix(new_xyz, new_features_rgb, None, None, new_opacities, new_scaling, new_rotation, new_mask, new_xyzEmbeding)
         else:
-            self.densification_postfix(new_xyz, None, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation)
+            self.densification_postfix(new_xyz, None, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_mask)
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
         grads = self.xyz_gradient_accum / self.denom
@@ -573,7 +584,8 @@ class GaussianModel(nn.Module):
         self.densify_and_split(grads, max_grad, extent)
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
-        # prune_mask = torch.logical_or((torch.sigmoid(self._mask) <= 0.01).squeeze(),(self.get_opacity < min_opacity).squeeze())
+        if self.mask_prune_use:
+            prune_mask = torch.logical_or((torch.sigmoid(self._mask) <= 0.01).squeeze(),(self.get_opacity < min_opacity).squeeze())
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size # 这里有bug？self.max_radii2D在前面clone和split的时候清空了
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent

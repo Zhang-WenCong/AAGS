@@ -18,6 +18,7 @@ from scene.gaussian_model import GaussianModel
 # from scene.specular_model import SpecularModel
 from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
+import torch
 
 class Scene:
 
@@ -43,6 +44,12 @@ class Scene:
 
         if os.path.exists(os.path.join(args.source_path, "sparse")):
             scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval)
+            if 'gate' in args.source_path:
+                self.gaussians.a_encoder.load_state_dict(torch.load('./weights/gate_good.pth'))
+            elif 'sacre' in args.source_path:
+                self.gaussians.a_encoder.load_state_dict(torch.load('./weights/sacre_good.pth'))
+            elif 'trevi' in args.source_path:
+                self.gaussians.a_encoder.load_state_dict(torch.load('./weights/trevi_good.pth'))
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
             print("Found transforms_train.json file, assuming Blender data set!")
             scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval)

@@ -104,6 +104,7 @@ class OptimizationParams(ParamGroup):
         self.mlp_depth = 4
         self.mlp_width = 64
         self.mask_prune_iter = 1_000
+        self.mask_prune_use = False # mask_prune
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):

@@ -41,7 +41,7 @@ import numpy as np
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset, opt)
-    gaussians = GaussianModel(sh_degree=dataset.sh_degree, mlp_depth=opt.mlp_depth, mlp_width=opt.mlp_width, frgb=opt.frgb, mask=opt.mask_unet, a_use=opt.a_enc)
+    gaussians = GaussianModel(sh_degree=dataset.sh_degree, mlp_depth=opt.mlp_depth, mlp_width=opt.mlp_width, frgb=opt.frgb, mask=opt.mask_unet, a_use=opt.a_enc, mask_prune_use=opt.mask_prune_use)
     
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
@@ -69,7 +69,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     viewpoint_stack = None
     ema_loss_for_log = 0.0
-    progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
+    log_file_path=os.path.join(dataset.model_path,"train.log")
+    progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress", file=open(log_file_path, 'w'))
     first_iter += 1
     for iteration in range(first_iter, opt.iterations + 1):        
         if network_gui.conn == None:
@@ -116,7 +117,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         else:
             enc_a = None
         # render img from enc_a
-        render_pkg = render(viewpoint_cam, gaussians, pipe, bg, a_use=opt.a_enc, enc_a_r=enc_a)
+        render_pkg = render(viewpoint_cam, gaussians, pipe, bg, a_use=opt.a_enc, enc_a_r=enc_a, mask_prune_use=opt.mask_prune_use)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
         input['rgb_fine'] = image
         if opt.a_enc:
@@ -142,6 +143,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # Loss
         # Ll1 = l1_loss(gt_image, image)
         loss = sum(l for l in h_l.values()) # + 0.0005*torch.mean((torch.sigmoid(gaussians._mask)))
+        if opt.mask_prune_use:
+            loss += 0.0005*torch.mean((torch.sigmoid(gaussians._mask)))
         loss.backward()
 
         iter_end.record()
@@ -162,8 +165,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if iteration == opt.iterations:
                 progress_bar.close()    
 
-            # if iteration == opt.iterations:
-            #     gaussians.mask_prune()
+            if iteration == opt.iterations and opt.mask_prune_use:
+                gaussians.mask_prune()
 
             # Log and save
             training_report(tb_writer, iteration, h_l['f_l'], loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), opt.a_enc)
@@ -184,9 +187,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
-            # else:
-            #     if iteration % opt.mask_prune_iter == 0:
-            #         gaussians.mask_prune()
+            else:
+                if iteration % opt.mask_prune_iter == 0 and opt.mask_prune_use:
+                    gaussians.mask_prune()
 
             # Optimizer step
             if iteration < opt.iterations:
