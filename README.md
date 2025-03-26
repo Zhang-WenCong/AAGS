@@ -47,3 +47,10 @@ Or just run
 ```
 sh benchmark_wild.sh
 ```
+
+## Model weights
+
+You can download our model weights [here](https://pan.baidu.com/s/1zXj_eHFx1OCoFu85mtpSxg?pwd=sp94) (code:sp94) and run
+```
+$ python render.py --model_path "model_weights/point_cloud/iteration_30000"
+```
